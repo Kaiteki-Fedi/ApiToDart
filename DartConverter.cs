@@ -33,7 +33,7 @@ namespace ApiToDart
         {
             var propertyId = className + '.' + propertyName;
 
-            if (job.Default.NullabilityCorrections.TryGetValue(propertyId, out var v))
+            if (job.Default.NullabilityCorrections?.TryGetValue(propertyId, out var v) == true)
             {
                 return v;
             }
@@ -197,7 +197,7 @@ namespace ApiToDart
             var jobSettings = Utils.GetJobSettings(job, schemaName);
 
             // append imports
-            AppendImports(code, job, spec, schema.Properties.Values, schemaName);
+            AppendImports(code, job, spec, schema.Properties?.Values, schemaName);
 
             // append part reference
             string fileName = schemaName.ApplyNaming(DartNamingConvention.FileName);

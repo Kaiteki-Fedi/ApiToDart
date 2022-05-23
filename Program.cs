@@ -66,6 +66,14 @@ namespace ApiToDart
 
             foreach (var (key, schema) in schemas)
             {
+                if (schema.Properties == null)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Schema {key} had no data");
+                    Console.ResetColor();
+                    continue;
+                }
+
                 await ConvertSchemaAsync(job, spec, schema, schema.Title ?? key);
             }
         }
