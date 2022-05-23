@@ -1,9 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Text;
-using System.Xml.Linq;
 
 using ApiToDart.Dart;
 
@@ -15,13 +13,115 @@ namespace ApiToDart
 {
     public partial class DartConverter
     {
+        public Job Job { get; }
+        public JobSettings Settings => Job.Default;
+        public (string Name, DataSchema Schema)[] Schemas { get; }
 
-        private static void AppendConstructor(CodeStringBuilder code, DataSchema schema, string className, Job job)
+        public DartConverter(Job job, Specification specification)
+        {
+            Job = job ?? throw new ArgumentNullException(nameof(job));
+            Schemas = ResolveSchemas(specification.Components.Schemas);
+        }
+
+        private static (string, DataSchema)[] ResolveSchemas(Dictionary<string, DataSchema> schemas)
+        {
+            int length = schemas.Count;
+            var array = new (string, DataSchema)[length];
+
+            for (int i = 0; i < length; i++)
+            {
+                var key = schemas.Keys.ElementAt(i);
+                DataSchema schema = schemas[key];
+
+                if (IsPartial(schema))
+                {
+                    schema = ResolveSchema(schemas, schema);
+                }
+
+                array[i] = (key, schema);
+            }
+
+            return array;
+
+        }
+
+        private static bool IsPartial(DataSchema schema)
+        {
+            return schema.OneOf?.Count > 0 ||
+                    schema.AllOf?.Count > 0 ||
+                    schema.AnyOf?.Count > 0;
+        }
+
+        private static DataSchema ResolveSchema(Dictionary<string, DataSchema> schemas, DataSchema schema)
+        {
+            if (schema.Properties?.Count > 0)
+            {
+                throw new NotImplementedException("Unsupported situation, mixed schemas with properties defined");
+            }
+
+            var partialReferences = new List<DataSchema>();
+
+            if (schema.AllOf != null)
+            {
+                partialReferences.AddRange(schema.AllOf);
+            }
+            if (schema.OneOf != null)
+            {
+                partialReferences.AddRange(schema.OneOf);
+            }
+            if (schema.AnyOf != null)
+            {
+                partialReferences.AddRange(schema.AnyOf);
+            }
+
+            DataSchema mergedSchema = schema with
+            {
+                OneOf = null,
+                AllOf = null,
+                AnyOf = null,
+            };
+
+            foreach (var item in partialReferences)
+            {
+                DataSchema referencedSchema = item;
+
+                // Resolve reference
+                if (referencedSchema.Ref != null)
+                {
+                    referencedSchema = schemas[referencedSchema.Ref];
+                }
+
+                // Check whether our referenced schema references another one
+                // If so, recurse.
+                if (IsPartial(referencedSchema))
+                {
+                    referencedSchema = ResolveSchema(schemas, referencedSchema);
+                }
+
+                if (!(referencedSchema.Properties?.Count > 0))
+                {
+                    Utils.WriteWarning($"[{schema.Title}] Tried to merge a schema with another one who doesn't have any properties.");
+                    continue;
+                }
+
+                // Merge
+                var properties = mergedSchema.Properties ?? new Dictionary<string, Property>();
+                var newProperties = referencedSchema.Properties.Where(kv => !properties.ContainsKey(kv.Key));
+                mergedSchema = mergedSchema with
+                {
+                    Properties = new(properties.Concat(newProperties))
+                };
+            }
+
+            return mergedSchema;
+        }
+
+        private void AppendConstructor(CodeStringBuilder code, DataSchema schema, string className)
         {
             var parameters = schema.Properties
                 .Select((kv) =>
                 {
-                    bool nullable = IsNullable(kv.Value, job, className, kv.Key);
+                    bool nullable = IsNullable(kv.Value, className, kv.Key);
                     return GetParameter(kv.Key, nullable);
                 })
                 .ToArray();
@@ -29,11 +129,11 @@ namespace ApiToDart
             DartCodeWriter.WriteMultiLineConstructor(code, className, ElementFlags.Const, parameters);
         }
 
-        private static bool IsNullable(Property property, Job job, string className, string propertyName)
+        private bool IsNullable(Property property, string className, string propertyName)
         {
             var propertyId = className + '.' + propertyName;
 
-            if (job.Default.NullabilityCorrections?.TryGetValue(propertyId, out var v) == true)
+            if (Settings.NullabilityCorrections?.TryGetValue(propertyId, out var v) == true)
             {
                 return v;
             }
@@ -65,27 +165,19 @@ namespace ApiToDart
             }
         }
 
-        private static (string Name, DataSchema Schema)? FindSchema(Specification spec, string name, bool ignoreCase = true)
+        private (string Name, DataSchema Schema)? FindSchema(string name, bool ignoreCase = true)
         {
             StringComparison stringComparison = ignoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
-            bool predicate(KeyValuePair<string, DataSchema> kv)
+            bool predicate((string, DataSchema) kv)
             {
-                return kv.Key.Equals(name, stringComparison);
+                return kv.Item1.Equals(name, stringComparison);
             };
 
-            if (spec.Components.Schemas.Any(predicate))
-            {
-                var kv = spec.Components.Schemas.First(predicate);
-                return (kv.Key, kv.Value);
-            }
-            else
-            {
-                return null;
-            }
+            return Schemas.FirstOrDefault(predicate);
         }
 
-        private static void AppendImports(StringBuilder sb, Job job, Specification spec, IEnumerable<Property> properties, string currentSchema)
+        private void AppendImports(StringBuilder sb, IEnumerable<Property> properties, string currentSchema)
         {
             var dataTypes = properties.Select(Utils.GetPropertyReference)
                                       .Distinct()
@@ -96,12 +188,12 @@ namespace ApiToDart
 
             foreach (var type in dataTypes)
             {
-                var schema = FindSchema(spec, type);
+                var schema = FindSchema(type);
 
                 if (schema.HasValue)
                 {
                     string name = schema.Value.Name;
-                    JobSettings schemaOverride = Utils.GetJobSettings(job, name);
+                    JobSettings schemaOverride = Utils.GetJobSettings(Job, name);
 
                     string fileName = name.ApplyNaming(DartNamingConvention.FileName);
                     imports.Add("package:" + schemaOverride.ImportPrefix + '/' + fileName + ".dart");
@@ -119,22 +211,26 @@ namespace ApiToDart
             }
         }
 
-        private string ToDartType(Job job, Specification spec, Property property, string name, string className)
+        private string ToDartType(Property property, string name, string className)
         {
             string type = property?.Type;
 
+            // Check for array
             if (type == "array")
             {
-                return $"Iterable<{ToDartType(job, spec, property.Items, name, className)}>";
+                return $"Iterable<{ToDartType(property.Items, name, className)}>";
             }
-            else if (job.Default.TypeCorrections?.TryGetValue(className + '.' + name, out var correctedType) == true)
+
+            // Check if manually corrected type was given.
+            var memberId = className + '.' + name;
+            if (Settings.TypeCorrections?.TryGetValue(memberId, out var correctedType) == true)
             {
                 return correctedType;
             }
 
             if (Utils.GetPropertyReference(property) is string schemaReference)
             {
-                var schema = FindSchema(spec, schemaReference, false);
+                var schema = FindSchema(schemaReference, false);
 
                 if (!schema.HasValue)
                 {
@@ -145,7 +241,7 @@ namespace ApiToDart
 
                 if (schemaType == "object")
                 {
-                    var settings = Utils.GetJobSettings(job, schemaReference);
+                    var settings = Utils.GetJobSettings(Job, schemaReference);
                     return settings.ClassNamePrefix + schemaReference.Pascalize();
                 }
 
@@ -162,7 +258,7 @@ namespace ApiToDart
                 "boolean" => "bool",
                 "number" or "integer" => "int",
                 // Use singularized property name as type name when schema with that name exists.
-                "object" when name.Singularize() is string sName && FindSchema(spec, sName) != null => sName.ApplyNaming(DartNamingConvention.Class),
+                "object" when name.Singularize() is string sName && FindSchema(sName) != null => sName.ApplyNaming(DartNamingConvention.Class),
                 // Generate type name when anonymized object with declared properties is used
                 "object" when allowAnonymizedObjectGen && property.Properties != null => GetEnumName(className, name),
                 "object" => "Map<String, dynamic>",
@@ -176,28 +272,32 @@ namespace ApiToDart
             return $"{className}_{propertyName}".Pascalize();
         }
 
-        private void AppendField(CodeStringBuilder code, string jsonKey, Job job, Specification spec, Property property, string className)
+        private void AppendField(CodeStringBuilder code, string jsonKey, Property property, string className)
         {
             // add dartdoc comment
             AppendDartDocComment(code, property.Description);
 
-            // add json attribute
-            code.AppendLine($"@JsonKey(name: '{jsonKey}')");
+            string name = jsonKey.ApplyNaming(DartNamingConvention.Field);
 
-            string fieldName = jsonKey.ApplyNaming(DartNamingConvention.Field);
-            string fieldType = ToDartType(job, spec, property, fieldName, className);
-            bool fieldNullability = IsNullable(property, job, className, fieldName);
-            string fieldLine = DartCodeWriter.GetField(fieldType, fieldName, fieldNullability, ElementFlags.Final);
-            code.AppendLine(fieldLine);
+            // add json attribute
+            if (jsonKey != name)
+            {
+                code.AppendLine($"@JsonKey(name: '{jsonKey}')");
+            }
+
+            string type = ToDartType(property, name, className);
+            bool nullability = IsNullable(property, className, name);
+            string line = DartCodeWriter.GetField(type, name, nullability, ElementFlags.Final);
+            code.AppendLine(line);
         }
 
-        public string ToDartFile(Job job, Specification spec, DataSchema schema, string schemaName)
+        public string ToDartFile(DataSchema schema, string schemaName)
         {
             var code = new CodeStringBuilder();
-            var jobSettings = Utils.GetJobSettings(job, schemaName);
+            var jobSettings = Utils.GetJobSettings(Job, schemaName);
 
             // append imports
-            AppendImports(code, job, spec, schema.Properties?.Values, schemaName);
+            AppendImports(code, schema.Properties?.Values, schemaName);
 
             // append part reference
             string fileName = schemaName.ApplyNaming(DartNamingConvention.FileName);
@@ -208,7 +308,7 @@ namespace ApiToDart
             AppendDartDocComment(code, schema.Description);
 
             string className = jobSettings.ClassNamePrefix + schemaName.Pascalize();
-            AppendClass(job, code, className, spec, schema);
+            AppendClass(code, className, schema);
 
             foreach (var (name, property) in schema.Properties)
             {
@@ -218,16 +318,16 @@ namespace ApiToDart
                     AppendEnum(code, enumName, property.Enum);
                 }
 
-                if (property.Type == "object" && property.Properties != null)
-                {
-                    string schemalessClassName = GetEnumName(className, name);
-                }
+                // if (property.Type == "object" && property.Properties != null)
+                // {
+                //     string schemalessClassName = GetEnumName(className, name);
+                // }
             }
 
             return code.ToString();
         }
 
-        public void AppendEnum(CodeStringBuilder code, string enumName, string[] values)
+        public static void AppendEnum(CodeStringBuilder code, string enumName, string[] values)
         {
             code.AppendLine($"enum {enumName} {{");
 
@@ -243,7 +343,7 @@ namespace ApiToDart
             code.AppendLine("}");
         }
     
-        public void AppendClass(Job job, CodeStringBuilder code, string className, Specification spec, DataSchema schema)
+        public void AppendClass(CodeStringBuilder code, string className, DataSchema schema)
         {
             code.AppendLine("@JsonSerializable()");
             code.AppendLine($"class {className} {{");
@@ -253,11 +353,11 @@ namespace ApiToDart
             // write fields
             foreach (var (name, property) in schema.Properties)
             {
-                AppendField(code, name, job, spec, property, className);
+                AppendField(code, name, property, className);
             }
 
             // append constructor
-            AppendConstructor(code, schema, className, job);
+            AppendConstructor(code, schema, className);
 
             // append json
             code.AppendLine();

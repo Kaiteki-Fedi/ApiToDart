@@ -10,12 +10,11 @@ namespace ApiToDart
 {
     internal class Program
     {
-        private static readonly DartConverter _converter = new();
         private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
-        private static async Task ConvertSchemaAsync(Job job, Specification spec, DataSchema schema, string schemaName)
+        private static async Task ConvertSchemaAsync(DartConverter converter, DataSchema schema, string schemaName)
         {
-            var settings = Utils.GetJobSettings(job, schemaName);
+            var settings = Utils.GetJobSettings(converter.Job, schemaName);
 
             if (settings.Ignore)
             {
@@ -29,7 +28,7 @@ namespace ApiToDart
 
             string fileName = schemaName.ApplyNaming(DartConverter.DartNamingConvention.FileName) + ".dart";
             string filePath = Path.Combine(settings.OutputDirectory, fileName);
-            string source = _converter.ToDartFile(job, spec, schema, schemaName);
+            string source = converter.ToDartFile(schema, schemaName);
 
             await File.WriteAllTextAsync(filePath, source);
         }
@@ -54,7 +53,8 @@ namespace ApiToDart
         private static async Task RunJobAsync(Job job)
         {
             var json = await Utils.FetchJson(job);
-            var spec = JsonSerializer.Deserialize<Specification>(json, _jsonOptions);
+            var specification = JsonSerializer.Deserialize<Specification>(json, _jsonOptions);
+            var converter = new DartConverter(job, specification);
 
             var outputDirectoryPath = job.Default.OutputDirectory;
             if (!Directory.Exists(outputDirectoryPath))
@@ -62,7 +62,7 @@ namespace ApiToDart
                 Directory.CreateDirectory(outputDirectoryPath);
             }
 
-            var schemas = spec.Components.Schemas.Where(kv => kv.Value.Type == "object");
+            var schemas = converter.Schemas.Where(kv => kv.Schema.Type == "object");
 
             foreach (var (key, schema) in schemas)
             {
@@ -74,7 +74,7 @@ namespace ApiToDart
                     continue;
                 }
 
-                await ConvertSchemaAsync(job, spec, schema, schema.Title ?? key);
+                await ConvertSchemaAsync(converter, schema, schema.Title ?? key);
             }
         }
     }
