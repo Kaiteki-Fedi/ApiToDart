@@ -6,11 +6,13 @@ using System.Threading.Tasks;
 
 using OpenApiBrowser.Model;
 
+using Path = System.IO.Path;
+
 namespace ApiToDart
 {
     internal class Program
     {
-        private static readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
+        private static readonly JsonSerializerOptions _jsonOptions = new(JsonSerializerDefaults.Web) { AllowTrailingCommas = true };
 
         private static async Task ConvertSchemaAsync(DartConverter converter, DataSchema schema, string schemaName)
         {
@@ -75,6 +77,27 @@ namespace ApiToDart
                 }
 
                 await ConvertSchemaAsync(converter, schema, schema.Title ?? key);
+            }
+
+            if (job.Default.EndpointSchemaInclude != null)
+            {
+
+                foreach (var kv in job.Default.EndpointSchemaInclude)
+                {
+                    var key = kv.Key.Split('@');
+                    var pathUrl = key[0];
+                    var path = specification.Paths[pathUrl];
+
+                    var aaa = key[1] switch
+                    {
+                        "post" => path.Post,
+                        _ => throw new NotImplementedException(),
+                    };
+
+                    var response = aaa.Responses[key[2]];
+                    var schema = response.Content["application/json"].Schema;
+                    await ConvertSchemaAsync(converter, schema, kv.Value ?? schema.Title);
+                }
             }
         }
     }

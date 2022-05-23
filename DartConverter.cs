@@ -218,7 +218,14 @@ namespace ApiToDart
             // Check for array
             if (type == "array")
             {
-                return $"Iterable<{ToDartType(property.Items, name, className)}>";
+                string arrayType = Settings.ArrayConversion switch
+                {
+                    ArrayConversion.Iterable => "Iterable",
+                    ArrayConversion.List => "List",
+                    _ => throw new NotImplementedException(),
+                };
+
+                return $"{arrayType}<{ToDartType(property.Items, name, className)}>";
             }
 
             // Check if manually corrected type was given.

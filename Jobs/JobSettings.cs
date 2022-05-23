@@ -15,7 +15,16 @@ namespace ApiToDart
 
         public string OutputDirectory { get; set; }
 
+        public ArrayConversion ArrayConversion { get; set; } = ArrayConversion.List;
+
         public Dictionary<string, string> TypeCorrections { get; set; }
         public Dictionary<string, bool> NullabilityCorrections { get; set; }
+        public Dictionary<string, string> EndpointSchemaInclude { get; set; }
+    }
+
+    public enum ArrayConversion
+    {
+        Iterable,
+        List
     }
 }
